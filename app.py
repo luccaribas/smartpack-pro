@@ -116,17 +116,21 @@ class SmartPackBackend:
             if bW == 0: bW = vars_eng.get('Hss', H) * 2
             
             return bL, bW
-
-# =========================================================
-# 2. CONFIGURAÇÃO E DADOS
+            # =========================================================
+# 2. CONFIGURAÇÕES E DADOS
 # =========================================================
 st.set_page_config(page_title="SmartPack Pro", layout="wide")
 
+# --- CORREÇÃO DO ERRO DE CACHE ---
+# Mudamos o nome da função para 'load_engine_v3' para forçar
+# o Streamlit a esquecer a versão antiga e carregar a nova.
 @st.cache_resource
-def load_engine():
+def load_engine_v3():
     return SmartPackBackend('formulas_smartpack.csv')
 
-engine = load_engine()
+engine = load_engine_v3()
+
+
 
 # Materiais e Preços (Mantidos do seu código original)
 CONFIG_TECNICA = {
