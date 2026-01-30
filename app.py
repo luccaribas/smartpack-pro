@@ -3,7 +3,53 @@ import pandas as pd
 import math
 
 # =========================================================
-# 1. SMARTPACK ENGINE (PRECISION CORE)
+# 1. ENGINE DE CALIBRAÇÃO (A INTELIGÊNCIA AUTOMÁTICA)
+# =========================================================
+class CalibrationEngine:
+    """
+    Define os fatores K (Compensação) para cada família FEFCO.
+    Isso garante o 'Ajuste Fino' automático para as 6000 caixas.
+    """
+    @staticmethod
+    def get_factors(modelo, d):
+        # 1. Identifica a Família
+        fam = str(modelo)[0] # '2', '3', '4'...
+        
+        # --- PERFIL A: TUBULARES (Maletas 02xx, Coladas 07xx, Deslizantes 05xx) ---
+        # Característica: O vinco "quebra" a fibra e esmaga o papelão.
+        # A compensação é mínima no comprimento e alta na altura.
+        if fam in ['2', '5', '6', '7']:
+            return {
+                'C90': 0.5,             # Perda no Comprimento (Quase zero, fixo)
+                'C180': 1.0 * d,        # Dobra total (se houver)
+                'HC90': 1.7 * d,        # Ganho na Altura (Onda 3mm -> +5.1mm)
+                'Glue': 0.5,            # Ganho na Aba de Cola
+                'Slot': d + 1.0,        # Abertura do Slot (Justa)
+                'Profile': 'Tubular (Crushed Crease)'
+            }
+            
+        # --- PERFIL B: TABULEIROS (Tampas 03xx, Corte e Vinco 04xx) ---
+        # Característica: O papelão dobra sobre si mesmo (parede dupla).
+        # A compensação é geometricamente igual à espessura.
+        elif fam in ['3', '4']:
+            return {
+                'C90': 1.0 * d,         # Perda = Espessura (Geometria Pura)
+                'C180': 2.0 * d,        # Dobra dupla (Travas)
+                'HC90': 1.0 * d,        # Ganho na Altura = Espessura
+                'Glue': 1.0 * d,        # (Raro em 04xx, mas segue espessura)
+                'Slot': d + 2.0,        # Abertura do Slot (Folgada para encaixe)
+                'Profile': 'Tray (Rolling Fold)'
+            }
+            
+        # --- PERFIL C: INTERNOS (09xx) ---
+        else:
+            return {
+                'C90': 0.5 * d, 'C180': d, 'HC90': d, 'Glue': 0, 'Slot': d,
+                'Profile': 'Generic'
+            }
+
+# =========================================================
+# 2. SMARTPACK BACKEND (PROCESSADOR)
 # =========================================================
 class SmartPackBackend:
     def __init__(self, csv_path='formulas_smartpack.csv'):
@@ -24,40 +70,32 @@ class SmartPackBackend:
         
         if df_model.empty: return None
 
-        # --- CALIBRAÇÃO DE PRECISÃO (EngView/Prinect) ---
-        # Define como o papelão se comporta nas dobras
-        # Maletas (02xx) e Coladas (07xx) = Vinco Esmagado
-        # Caixas Montáveis (03xx, 04xx) = Dobra Sobreposta
-        familia = modelo[0]
-        is_crushed_crease = familia in ['2', '5', '6', '7']
-        
-        calib = {
-            'C90': 0.5 if is_crushed_crease else 1.0 * d,
-            'HC90': (1.7 * d) if is_crushed_crease else 1.0 * d,
-            'Glue': 0.5 if is_crushed_crease else 1.0 * d,
-            'Slot': (d + 1.0) if is_crushed_crease else (d + 2.0)
-        }
+        # --- APLICAÇÃO DO AJUSTE FINO AUTOMÁTICO ---
+        # Pega o perfil exato para este modelo
+        k = CalibrationEngine.get_factors(modelo, d)
 
+        # Injeta os fatores no contexto matemático
         contexto = {
             'L': float(L), 'W': float(W), 'H': float(H), 'd': lambda: float(d),
             'dtID': 1, 'dtOD': 0, 'No': 0, 'Yes': 1, 'Flat': 0, 'Round': 1, 'fd': lambda: 0,
             'sqrt': math.sqrt, 'min': min, 'max': max, 'tan': math.tan, 'atan': math.atan,
             
-            # Funções que garantem a exatidão dos vincos
-            'C90x': lambda *a: calib['C90'], 
-            'C90y': lambda *a: calib['C90'],
-            'HC90x': lambda *a: calib['HC90'], 
-            'GlueCorr': lambda *a: calib['Glue'],
+            # --- MAPEAMENTO DIRETO DE ENGENHARIA ---
+            # Aqui garantimos que TODAS as fórmulas do CSV usem os valores calibrados
+            'C90x': lambda *a: k['C90'], 
+            'C90y': lambda *a: k['C90'],
+            'HC90x': lambda *a: k['HC90'], 
+            'GlueCorr': lambda *a: k['Glue'],
             'LPCorr': lambda *a: 1.0 * d, 
-            'GLWidth': lambda *a: 35.0, # Padrão Heidelberg para aba de cola
+            'GLWidth': lambda *a: 35.0, # Padrão
             'LSCf': lambda *a: 1.5 * d, 
-            'SlotWidth': lambda *a: calib['Slot'],
+            'SlotWidth': lambda *a: k['Slot'],
             'LC': lambda d_val, dt, iln, oln: (iln if dt==1 else oln) * d,
             'switch': lambda cond, *args: args[1] if cond else args[0]
         }
         
         resolvidos = {}
-        # Loop de resolução profunda (5 passadas para pegar todas dependências)
+        # Resolve todas as 6000 fórmulas com os novos fatores
         for _ in range(5):
             for _, row in df_model.iterrows():
                 param = row['Parametro']
@@ -69,97 +107,89 @@ class SmartPackBackend:
                     contexto[param] = val
                     resolvidos[param] = val
                 except: pass
+        
+        # Adiciona o perfil ao resultado para debug
+        resolvidos['_Profile'] = k['Profile']
         return resolvidos
 
     def calcular_blank(self, modelo, L, W, H, d):
         vars_eng = self._get_engine_variables(modelo, L, W, H, d)
-        if not vars_eng: return 0, 0, "Erro: Modelo Vazio"
+        if not vars_eng: return 0, 0, "Erro"
 
-        # --- DETECTOR DE TOPOLOGIA (A Chave da Exatidão) ---
-        # Em vez de adivinhar pela família, olhamos quais peças existem.
+        # Variáveis base do CSV (Já calibradas)
+        # Se o CSV falhar, usa o fator K correspondente como fallback
+        k = CalibrationEngine.get_factors(modelo, d)
         
+        Lss = vars_eng.get('Lss', L + k['C90']*2)
+        Wss = vars_eng.get('Wss', W + k['C90']*2)
+        Hss = vars_eng.get('Hss', H + k['HC90'])
+        
+        # --- TOPOLOGIA AUTOMÁTICA ---
         has_GL = 'GL' in vars_eng or 'GLWidth' in str(self.df[self.df['Modelo']==modelo]['Formula'].values)
         
-        # Recupera variáveis EXATAS calculadas pelo CSV (já com descontos de vinco)
-        # Se não existir no CSV, calcula na hora usando a calibração
-        Lss = vars_eng.get('Lss', L + vars_eng.get('C90y', 0.5)*2) 
-        Wss = vars_eng.get('Wss', W + vars_eng.get('C90y', 0.5)*2)
-        Hss = vars_eng.get('Hss', H + vars_eng.get('HC90x', 1.7*d))
-        
-        # CASO 1: CAIXA TUBULAR (Tem aba de cola) -> 02xx, 07xx, etc.
-        # A fórmula é sempre linear: Aba + Painel + Painel + Painel + Painel
-        if has_GL or modelo.startswith(('2', '5', '6')):
+        # 1. TOPOLOGIA TUBULAR (Maletas e afins)
+        if has_GL or modelo.startswith(('2', '5', '6', '7')):
             GL = vars_eng.get('GL', 35.0)
-            
-            # O Comprimento é exato:
             Blank_X = GL + Lss + Wss + Lss + Wss
             
-            # A Largura depende das abas (Flaps)
-            # O CSV geralmente chama de 'FH' (Flap Height) ou usa Wss/2
             Flap_Top = vars_eng.get('FH', Wss / 2)
-            Flap_Bottom = vars_eng.get('FH_B', Flap_Top) # Espelhado se não houver específico
-            
-            # Ajustes finos conhecidos para modelos críticos
             if modelo == '200': Flap_Top = 0
-            elif modelo == '203': Flap_Top, Flap_Bottom = Wss - d, Wss - d
-            elif modelo.startswith('7'): Flap_Bottom = Wss * 0.75 # Fundo automático padrão
-
+            elif modelo == '203': Flap_Top = Wss - d
+            elif modelo.startswith('7'): Flap_Top = Wss * 0.5 # Padrão
+            
+            # Espelhamento inteligente do fundo
+            Flap_Bottom = vars_eng.get('FH_B', Flap_Top)
+            
             Blank_Y = Flap_Top + Hss + Flap_Bottom
-            return Blank_X, Blank_Y, "Tubular (Exato)"
+            return Blank_X, Blank_Y, k['Profile']
 
-        # CASO 2: GEOMETRIA COMPLEXA (0427 E-commerce)
-        # Validada pixel a pixel com o Prinect
+        # 2. TOPOLOGIA COMPLEXA (0427 E-commerce)
         elif modelo == '427':
+            # Usa geometria validada, mas alimentada pelos K-Factors calibrados
             HssY = vars_eng.get('HssY', H + 2*d)
             FH1 = HssY + (1.5 * d)
             TPH = H
             DxPI = (3 * d) + 1.0
             TIFH = TPH - DxPI
             Blank_X = TIFH + Wss + HssY + Wss + FH1
-            
             Ear = HssY + 14.0
             PH = HssY - (0.5 * d)
             Blank_Y = Ear + PH + Lss + PH + Ear
-            return Blank_Y, Blank_X, "0427 Gold (Validado)"
+            return Blank_Y, Blank_X, "0427 Gold Standard"
 
-        # CASO 3: TABULEIROS / ENVELOPES (03xx, 04xx genéricos)
-        # A lógica é sempre Base + Paredes
+        # 3. TOPOLOGIA TABULEIRO (Caixas Telescópio / Corte e Vinco Genérico)
         else:
-            # Tenta encontrar a altura da parede no CSV
-            # Em tabuleiros, a altura da parede (Hss) é somada à base (Lss/Wss)
             Wall_H = vars_eng.get('Hss', H + d)
             
-            # Verifica se é telescópio (03xx) ou envelope (04xx)
-            if modelo.startswith('3'):
-                # Fundo + 2 Paredes
+            if modelo.startswith('3'): # Telescópio
                 Blank_X = Lss + (2 * Wall_H)
                 Blank_Y = Wss + (2 * Wall_H)
-                return Blank_X, Blank_Y, "Tabuleiro (Telescópio)"
-            else:
-                # Envelopes/Pastas (0400, 0410...)
-                # Geralmente L + 2H e W + 3H (tampa)
-                # Como não temos certeza da tampa, usamos uma margem técnica segura
-                # O ideal aqui é ler 'L_Blank' se o CSV tiver.
-                if 'L_Blank' in vars_eng:
-                    return vars_eng['L_Blank'], vars_eng['W_Blank'], "CSV Direto"
+                return Blank_X, Blank_Y, k['Profile']
+            else: # Envelopes 04xx Genéricos
+                # Se não temos a geometria exata, confiamos nas variáveis do CSV
+                # Se o CSV tiver 'L_Blank', usamos ele.
+                bL = vars_eng.get('L_Blank', 0)
+                bW = vars_eng.get('W_Blank', 0)
                 
-                # Cálculo Geométrico Rigoroso
+                if bL > 0: return bL, bW, "CSV Nativo"
+                
+                # Estimativa geométrica baseada em K-Factor
                 Blank_X = Lss + (2 * Wall_H)
-                Blank_Y = Wss + (3 * Wall_H) # +1 Wall para a tampa
-                return Blank_X, Blank_Y, "Envelope (Corte e Vinco)"
+                Blank_Y = Wss + (3 * Wall_H)
+                return Blank_X, Blank_Y, "Tray (Estimado)"
 
 # =========================================================
-# 2. APP CONFIG
+# 3. APP CONFIG E INTERFACE
 # =========================================================
-st.set_page_config(page_title="SmartPack Pro", layout="wide")
+st.set_page_config(page_title="SmartPack Auto-Tuning", layout="wide")
 
 @st.cache_resource
-def load_engine_v5(): # V5 para limpar cache antigo
+def load_engine_v6(): # Nova versão para limpar cache
     return SmartPackBackend('formulas_smartpack.csv')
 
-engine = load_engine_v5()
+engine = load_engine_v6()
 
-# Dados Técnicos
+# Configuração de Materiais
 CONFIG_TECNICA = {
     "Onda B": {"d": 3.0}, "Onda C": {"d": 4.0},
     "Onda BC (Dupla)": {"d": 6.9}, "Onda E (Micro)": {"d": 1.5},
@@ -176,11 +206,8 @@ def add_to_cart(item):
     st.session_state.carrinho.append(item)
     st.toast("Adicionado! 🛒", icon="✅")
 
-# =========================================================
-# 3. INTERFACE
-# =========================================================
-st.title("🛡️ SmartPack Pro - Precision")
-st.caption(f"🛠️ Engine V5: {len(engine.get_available_models())} modelos com topologia exata.")
+st.title("🛡️ SmartPack Pro - Auto Tuning")
+st.caption(f"🤖 Engine V6: {len(engine.get_available_models())} modelos com calibração automática por família.")
 
 with st.sidebar:
     st.header("1. Material")
@@ -195,11 +222,7 @@ with st.sidebar:
     populares = ['201', '427', '200', '203', '300', '301', '409', '711']
     lista_final = [m for m in populares if m in modelos_disponiveis] + [m for m in modelos_disponiveis if m not in populares]
     
-    modelo_visual = st.selectbox(
-        "Selecione o Modelo FEFCO",
-        lista_final,
-        format_func=lambda x: f"FEFCO {x.zfill(4)}"
-    )
+    modelo_visual = st.selectbox("Selecione o Modelo FEFCO", lista_final, format_func=lambda x: f"FEFCO {x.zfill(4)}")
     codigo_modelo = modelo_visual
 
 espessura_d = CONFIG_TECNICA[onda_sel]["d"]
@@ -213,36 +236,20 @@ with col1:
     H = st.number_input("Altura (mm)", value=100)
     qtd = st.number_input("Quantidade", value=500, step=100)
 
-# =========================================================
-# 4. CÁLCULO
-# =========================================================
-bL, bW, tipo_logica = engine.calcular_blank(codigo_modelo, L, W, H, espessura_d)
-
+bL, bW, perfil = engine.calcular_blank(codigo_modelo, L, W, H, espessura_d)
 area_m2 = (bL * bW) / 1_000_000
 valor_unit = (area_m2 * preco_m2_base) * 2.0 
 
 with col2:
-    st.subheader("Orçamento (Produção)")
+    st.subheader("Orçamento Calibrado")
+    st.success(f"Perfil de Engenharia: **{perfil}**")
     
-    st.success(f"Topologia Detectada: **{tipo_logica}**")
-    
-    # Aviso de Segurança para modelos não-tubulares e não-0427
-    if "Corte e Vinco" in tipo_logica and codigo_modelo != '427':
-        st.warning("⚠️ Atenção: Este modelo (Corte e Vinco) usa cálculo geométrico padrão. Para produção em massa, valide o primeiro blank físico.")
-
     c1, c2, c3 = st.columns(3)
     c1.metric("Preço Unitário", f"R$ {valor_unit:.2f}")
     c2.metric("Total", f"R$ {valor_unit * qtd:,.2f}")
     c3.metric("Área/Caixa", f"{area_m2:.3f} m²")
     
-    st.markdown(f"""
-    ### 📐 Blank de Produção
-    | Dimensão | Valor |
-    | :--- | :--- |
-    | **Largura Chapa** | **{bL:.1f} mm** |
-    | **Comprimento Chapa** | **{bW:.1f} mm** |
-    | *Modelo* | *FEFCO {codigo_modelo.zfill(4)}* |
-    """)
+    st.markdown(f"**Blank Final:** {bL:.1f} x {bW:.1f} mm")
     
     if st.button("➕ ADICIONAR AO CARRINHO", type="primary", use_container_width=True):
         add_to_cart({
