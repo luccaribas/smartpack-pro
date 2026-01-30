@@ -1,49 +1,43 @@
 import streamlit as st
 import pandas as pd
 import math
-import os # Biblioteca para ver arquivos do sistema
+import os
 
 # =========================================================
-# 1. ENGINE & CALIBRAÇÃO (V9 - MANTIDO)
+# 1. ENGINE DE PRECISÃO (MAPEAMENTO DE TOPOLOGIA)
 # =========================================================
-class CalibrationEngine:
-    @staticmethod
-    def get_factors(modelo, d):
-        fam = str(modelo)[0]
-        if fam in ['2', '5', '6', '7']: return {'C90': 0.5, 'C180': 1.0*d, 'HC90': 1.7*d, 'Glue': 0.5, 'Slot': d+1.0, 'Profile': 'Tubular'}
-        elif fam in ['3', '4']: return {'C90': 1.0*d, 'C180': 2.0*d, 'HC90': 1.0*d, 'Glue': 1.0*d, 'Slot': d+2.0, 'Profile': 'Tabuleiro'}
-        else: return {'C90': 0.5*d, 'C180': d, 'HC90': d, 'Glue': 0, 'Slot': d, 'Profile': 'Generico'}
-
 class SmartPackBackend:
     def __init__(self, csv_path='formulas_smartpack.csv'):
-        # Tenta ler o arquivo de fórmulas
         if os.path.exists(csv_path):
             try:
                 self.df = pd.read_csv(csv_path, delimiter=';', dtype={'Modelo': str})
                 self.df['Modelo'] = self.df['Modelo'].str.lstrip('0')
-            except: pass
-        else:
-            self.df = pd.DataFrame() # Cria vazio se falhar
+            except: self.df = pd.DataFrame()
+        else: self.df = pd.DataFrame()
 
     def get_available_models(self):
         if self.df.empty: return []
         return sorted(self.df['Modelo'].unique())
 
     def _get_engine_variables(self, modelo, L, W, H, d):
+        # ... (Mantém a lógica de leitura e cálculo de Lss/Wss/Hss) ...
+        # (Para economizar espaço aqui, a lógica interna é a mesma da V9, focada em ler as variáveis)
         modelo = str(modelo).lstrip('0')
         if self.df.empty: return None
         df_model = self.df[self.df['Modelo'] == modelo]
         if df_model.empty: return None
 
-        k = CalibrationEngine.get_factors(modelo, d)
+        # Calibração de K-Factors (Ajuste Fino de Dobra)
+        fam = modelo[0]
+        k = {'C90': 0.5, 'HC90': 1.7*d, 'Glue': 0.5, 'Slot': d+1.0} if fam in ['2','5','6','7'] else {'C90': 1.0*d, 'HC90': 1.0*d, 'Glue': 1.0*d, 'Slot': d+2.0}
+        
         contexto = {
             'L': float(L), 'W': float(W), 'H': float(H), 'd': lambda: float(d),
             'dtID': 1, 'dtOD': 0, 'No': 0, 'Yes': 1, 'Flat': 0, 'Round': 1, 'fd': lambda: 0,
             'sqrt': math.sqrt, 'min': min, 'max': max, 'tan': math.tan, 'atan': math.atan,
-            'C90x': lambda *a: k['C90'], 'C90y': lambda *a: k['C90'],
-            'HC90x': lambda *a: k['HC90'], 'GlueCorr': lambda *a: k['Glue'],
-            'LPCorr': lambda *a: 1.0 * d, 'GLWidth': lambda *a: 35.0,
-            'LSCf': lambda *a: 1.5 * d, 'SlotWidth': lambda *a: k['Slot'],
+            'C90x': lambda *a: k['C90'], 'C90y': lambda *a: k['C90'], 'HC90x': lambda *a: k['HC90'], 
+            'GlueCorr': lambda *a: k['Glue'], 'LPCorr': lambda *a: 1.0*d, 'GLWidth': lambda *a: 35.0,
+            'LSCf': lambda *a: 1.5*d, 'SlotWidth': lambda *a: k['Slot'],
             'LC': lambda d_val, dt, iln, oln: (iln if dt==1 else oln) * d,
             'switch': lambda cond, *args: args[1] if cond else args[0]
         }
@@ -51,178 +45,176 @@ class SmartPackBackend:
         resolvidos = {}
         for _ in range(5):
             for _, row in df_model.iterrows():
-                param = row['Parametro']
-                formula = str(row['Formula'])
-                if param in ['L', 'W', 'H', 'UL', 'DT']: continue
                 try:
+                    param = row['Parametro']
+                    formula = str(row['Formula'])
+                    if param in ['L', 'W', 'H']: continue
                     if formula.replace('.','',1).isdigit(): val = float(formula)
                     else: val = eval(formula.replace('^', '**'), {}, contexto)
                     contexto[param] = val
                     resolvidos[param] = val
                 except: pass
-        resolvidos['_Profile'] = k['Profile']
         return resolvidos
 
     def calcular_blank(self, modelo, L, W, H, d):
         vars_eng = self._get_engine_variables(modelo, L, W, H, d)
-        if not vars_eng: return 0, 0, "Erro"
+        if not vars_eng: return 0, 0, "Erro: Modelo não encontrado"
 
-        k = CalibrationEngine.get_factors(modelo, d)
-        Lss = vars_eng.get('Lss', L + k['C90']*2)
-        Wss = vars_eng.get('Wss', W + k['C90']*2)
-        Hss = vars_eng.get('Hss', H + k['HC90'])
+        # Recupera dimensões exatas de vinco (Score-to-Score)
+        # Se o CSV falhar, usa fallback seguro
+        Lss = vars_eng.get('Lss', L + d)
+        Wss = vars_eng.get('Wss', W + d)
+        Hss = vars_eng.get('Hss', H + (1.7*d if modelo[0] in ['2','5','7'] else d))
         
-        has_GL = 'GL' in vars_eng or 'GLWidth' in str(self.df[self.df['Modelo']==modelo]['Formula'].values)
+        # --- LÓGICA DE TOPOLOGIA AVANÇADA (A MÁGICA DA PRECISÃO) ---
         
-        if has_GL or modelo.startswith(('2', '5', '6', '7')):
+        # FAMÍLIA 02xx (Maletas e Tubos)
+        if modelo.startswith('2'):
             GL = vars_eng.get('GL', 35.0)
-            Blank_X = GL + Lss + Wss + Lss + Wss
-            Flap_Top = vars_eng.get('FH', Wss / 2)
-            if modelo == '200': Flap_Top = 0
-            elif modelo == '203': Flap_Top = Wss - d
-            Blank_Y = Flap_Top + Hss + vars_eng.get('FH_B', Flap_Top)
-            return Blank_X, Blank_Y, k['Profile']
-        elif modelo == '427':
-            HssY = vars_eng.get('HssY', H + 2*d)
-            FH1 = HssY + (1.5 * d)
-            TIFH = H - ((3 * d) + 1.0)
-            Blank_X = TIFH + Wss + HssY + Wss + FH1
-            PH = HssY - (0.5 * d)
-            Ear = HssY + 14.0
-            Blank_Y = Ear + PH + Lss + PH + Ear
-            return Blank_Y, Blank_X, "0427 Gold"
+            Blank_X = GL + 2*(Lss + Wss)
+            
+            # Altura varia conforme o fechamento do fundo
+            if modelo in ['200']: # Meia Maleta
+                Blank_Y = Hss + (Wss * 0.5) 
+                return Blank_X, Blank_Y, "Maleta Aberta (HSC)"
+            elif modelo in ['215', '216', '217']: # Fundo Snap-Lock (Complexo)
+                # Fundo precisa de travamento (aprox 75% da largura)
+                Blank_Y = (Wss * 0.5) + Hss + (Wss * 0.75)
+                return Blank_X, Blank_Y, "Fundo Snap-Lock (Travamento)"
+            else: # 201, 202, 203 (Padrão)
+                Blank_Y = Hss + Wss # (0.5 Topo + 0.5 Fundo = 1.0 W)
+                return Blank_X, Blank_Y, "Maleta Padrão (RSC)"
+
+        # FAMÍLIA 07xx (Coladas / Fundo Automático)
+        elif modelo.startswith('7'):
+            GL = vars_eng.get('GL', 35.0)
+            Blank_X = GL + 2*(Lss + Wss)
+            
+            # Fundo Automático consome muito papel para dobrar
+            # Regra de Ouro: Fundo = 0.75 * W + Sangria
+            Blank_Y = (Wss * 0.5) + Hss + (Wss * 0.8) 
+            return Blank_X, Blank_Y, "Fundo Automático (Crash Lock)"
+
+        # FAMÍLIA 04xx (Envoltórios e E-commerce)
+        elif modelo.startswith('4'):
+            if modelo == '427' or modelo == '426': # E-commerce Clássico
+                # Geometria Gold
+                HssY = vars_eng.get('HssY', H + 2*d)
+                FH1 = HssY + (1.5 * d)
+                TIFH = H - ((3 * d) + 1.0)
+                Blank_X = TIFH + Wss + HssY + Wss + FH1
+                PH = HssY - (0.5 * d)
+                Ear = HssY + 14.0
+                Blank_Y = Ear + PH + Lss + PH + Ear
+                return Blank_Y, Blank_X, "E-commerce (Sedex)"
+            else:
+                # Envelopes Genéricos (Cruz)
+                # Base + 2 Paredes + Tampa + Abas
+                Blank_X = Lss + (2.5 * Hss)
+                Blank_Y = Wss + (3.0 * Hss)
+                return Blank_X, Blank_Y, "Corte e Vinco (Envelope)"
+
+        # FAMÍLIA 03xx (Telescópio / Tampa e Fundo)
+        elif modelo.startswith('3'):
+            # Calcula o blank de UMA peça (Fundo).
+            # Se for tampa+fundo, o preço final deve considerar 2x peças ou 2x área.
+            # Aqui calculamos a peça base (Fundo)
+            Blank_X = Lss + (2 * Hss)
+            Blank_Y = Wss + (2 * Hss)
+            return Blank_X, Blank_Y, "Tabuleiro (Telescópio)"
+
+        # PADRÃO GENÉRICO (Segurança)
         else:
-            Wall_H = vars_eng.get('Hss', H + d)
-            if modelo.startswith('3'): return Lss + (2 * Wall_H), Wss + (2 * Wall_H), k['Profile']
-            else: return Lss + (2 * Wall_H), Wss + (3 * Wall_H), "Estimado"
+            return Lss + 2*Hss, Wss + 2*Hss, "Genérico Estimado"
 
 # =========================================================
-# 2. CONFIGURAÇÃO E CARGA SEGURA (V9)
+# 2. APP CONFIG & AUTO-DIAGNOSE
 # =========================================================
 st.set_page_config(page_title="SmartPack Enterprise", layout="wide")
 
 @st.cache_resource
-def load_engine_v9():
+def load_engine_v10():
     return SmartPackBackend('formulas_smartpack.csv')
 
-engine = load_engine_v9()
+engine = load_engine_v10()
 
 if 'carrinho' not in st.session_state: st.session_state.carrinho = []
 
-st.title("🏭 SmartPack Enterprise")
+st.title("🏭 SmartPack Enterprise (V10)")
 
-# --- FUNÇÃO DE DIAGNÓSTICO E LEITURA ---
+# --- LEITURA INTELIGENTE DE PREÇOS ---
 @st.cache_data
 def load_prices_safe():
-    # Procura arquivos com nomes parecidos para evitar erro de .txt oculto
-    arquivos_pasta = os.listdir()
-    
-    arquivo_encontrado = None
-    for f in arquivos_pasta:
-        if 'materiais' in f.lower() and 'csv' in f.lower():
-            arquivo_encontrado = f
-            break
-            
-    if arquivo_encontrado:
+    arquivos = [f for f in os.listdir() if 'materiais' in f.lower() and 'csv' in f.lower()]
+    if arquivos:
         try:
-            df = pd.read_csv(arquivo_encontrado, sep=';')
-            if len(df.columns) < 2: df = pd.read_csv(arquivo_encontrado, sep=',')
-            return df, arquivo_encontrado
-        except:
-            return None, "Erro Leitura"
+            df = pd.read_csv(arquivos[0], sep=';')
+            if len(df.columns) < 2: df = pd.read_csv(arquivos[0], sep=',')
+            return df, "Conectado"
+        except: pass
     
-    # Se não achou nada, retorna None
-    return None, "Não Encontrado"
+    # Fallback Padrão
+    return pd.DataFrame({
+        'Onda': ['B', 'C', 'BC', 'E'],
+        'Papel': ['Padrão', 'Padrão', 'Reforçado', 'Micro'],
+        'Gramatura': [380, 400, 700, 300],
+        'Espessura': [3.0, 4.0, 6.9, 1.5],
+        'Coluna': [4.0, 4.5, 8.0, 3.5],
+        'Preco_m2': [2.77, 2.85, 5.45, 2.50]
+    }), "Modo Demonstração"
 
-df_materiais, status_arquivo = load_prices_safe()
+df_materiais, status_bd = load_prices_safe()
 
 # --- BARRA LATERAL ---
 with st.sidebar:
-    st.header("⚙️ Configuração")
+    st.header("⚙️ Parâmetros")
+    st.caption(f"Status BD: {status_bd}")
     
-    # FERRAMENTA DE DIAGNÓSTICO (Vai aparecer na sua tela!)
-    if df_materiais is None:
-        st.error(f"⚠️ Status: {status_arquivo}")
-        st.warning("Usando Tabela PADRÃO (Modo Segurança)")
-        
-        # Mostra o que o Python está vendo na pasta
-        st.markdown("---")
-        st.caption("🕵️‍♂️ Diagnóstico de Arquivos:")
-        arquivos = os.listdir()
-        for f in arquivos:
-            if 'csv' in f or 'py' in f:
-                st.code(f) # Lista os arquivos reais
-        st.markdown("---")
-        
-        # Tabela Padrão (Fallback)
-        dados_padrao = {
-            'Onda': ['B', 'C', 'BC'],
-            'Papel': ['Reciclado', 'Kraft', 'Duplo'],
-            'Gramatura': [380, 400, 700],
-            'Espessura': [3.0, 4.0, 6.9],
-            'Coluna': [4.0, 4.5, 8.0],
-            'Preco_m2': [2.77, 2.85, 5.45]
-        }
-        df_materiais = pd.DataFrame(dados_padrao)
-    else:
-        st.success(f"✅ Tabela Carregada: `{status_arquivo}`")
-
-    # Filtros em Cascata
     ondas = df_materiais['Onda'].unique()
     onda_sel = st.selectbox("1. Onda", ondas)
     
     df_onda = df_materiais[df_materiais['Onda'] == onda_sel]
-    papeis = df_onda['Papel'].unique()
-    papel_sel = st.selectbox("2. Papel", papeis)
+    papel_sel = st.selectbox("2. Papel", df_onda['Papel'].unique())
     
     df_final = df_onda[df_onda['Papel'] == papel_sel]
-    colunas = df_final['Coluna'].unique()
-    coluna_sel = st.selectbox("3. Resistência", colunas)
+    coluna_sel = st.selectbox("3. Resistência", df_final['Coluna'].unique())
     
-    material = df_final[df_final['Coluna'] == coluna_sel].iloc[0]
-    espessura_real = float(material['Espessura'])
-    preco_base = float(material['Preco_m2'])
-    gramatura = material['Gramatura']
+    mat_row = df_final[df_final['Coluna'] == coluna_sel].iloc[0]
+    esp_real = float(mat_row['Espessura'])
+    preco_base = float(mat_row['Preco_m2'])
     
     st.divider()
     modelos = engine.get_available_models()
-    populares = ['201', '427', '200', '203', '711']
+    populares = ['201', '427', '200', '711', '215'] # Top 5 de Venda
     lista = [m for m in populares if m in modelos] + [m for m in modelos if m not in populares]
-    modelo_visual = st.selectbox("Modelo", lista, format_func=lambda x: f"FEFCO {x.zfill(4)}")
+    modelo_visual = st.selectbox("Modelo FEFCO", lista, format_func=lambda x: f"{x.zfill(4)}")
 
-# --- AREA PRINCIPAL ---
+# --- CÁLCULO E RESULTADO ---
 col1, col2 = st.columns([1, 2])
-
 with col1:
-    st.subheader("Medidas")
-    L = st.number_input("Comprimento (mm)", value=300)
-    W = st.number_input("Largura (mm)", value=200)
-    H = st.number_input("Altura (mm)", value=100)
-    qtd = st.number_input("Quantidade", value=1000, step=100)
-    st.caption(f"Material: {onda_sel} | {gramatura}g | {coluna_sel}kg")
+    st.subheader("Dimensões (Internas)")
+    L = st.number_input("Comp. (mm)", value=300)
+    W = st.number_input("Larg. (mm)", value=200)
+    H = st.number_input("Alt. (mm)", value=100)
+    qtd = st.number_input("Qtd.", value=1000, step=100)
 
-bL, bW, perfil = engine.calcular_blank(modelo_visual, L, W, H, espessura_real)
-area_m2 = (bL * bW) / 1_000_000
-preco_venda = (area_m2 * preco_base) * 2.0 
+bL, bW, perfil = engine.calcular_blank(modelo_visual, L, W, H, esp_real)
+area = (bL * bW) / 1_000_000
+total = (area * preco_base) * 2.0 * qtd
 
 with col2:
-    tab_cli, tab_fab = st.tabs(["Orçamento", "Fábrica"])
+    st.subheader("Resultado")
+    st.success(f"Logica Aplicada: **{perfil}**")
     
-    with tab_cli:
-        c1, c2 = st.columns(2)
-        c1.metric("Unitário", f"R$ {preco_venda:.2f}")
-        c2.metric("Total", f"R$ {preco_venda * qtd:,.2f}")
-        if st.button("🛒 Comprar"):
-            st.session_state.carrinho.append({"Modelo": modelo_visual, "Total": preco_venda*qtd})
-            st.toast("Sucesso!")
-
-    with tab_fab:
-        st.markdown(f"""
-        **Ordem de Produção:**
-        - Modelo: FEFCO {modelo_visual} ({perfil})
-        - Blank: **{bL:.1f} x {bW:.1f} mm**
-        - Material: Onda {onda_sel} (Esp: {espessura_real}mm)
-        """)
+    c1, c2 = st.columns(2)
+    c1.metric("Blank Calculado", f"{bL:.0f} x {bW:.0f} mm")
+    c2.metric("Valor Total", f"R$ {total:,.2f}")
+    
+    st.info(f"Consumo de Papel: {area:.4f} m²/caixa")
+    
+    if st.button("🛒 Adicionar Pedido"):
+        st.session_state.carrinho.append({"Modelo": modelo_visual, "Total": total})
+        st.toast("Adicionado!")
 
 if st.session_state.carrinho:
     st.dataframe(pd.DataFrame(st.session_state.carrinho))
