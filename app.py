@@ -101,11 +101,15 @@ class SmartPackBackend:
 # =========================================================
 st.set_page_config(page_title="SmartPack Enterprise", layout="wide")
 
+# MUDANÇA AQUI: Mudei o nome para 'load_engine_v7'
+# Isso obriga o Streamlit a esquecer o cache antigo e ler o código novo.
 @st.cache_resource
-def load_engine():
+def load_engine_v7():
     return SmartPackBackend('formulas_smartpack.csv')
 
-engine = load_engine()
+engine = load_engine_v7() # Atualize a chamada aqui também
+
+
 
 if 'carrinho' not in st.session_state: st.session_state.carrinho = []
 
