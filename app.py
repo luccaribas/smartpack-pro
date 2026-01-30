@@ -4,13 +4,13 @@ import math
 import os
 
 # =========================================================
-# 1. SMARTPACK TRANSLATOR ENGINE (V14 - FULL PRINECT SUPPORT)
+# 1. SMARTPACK V15 - DYNAMIC BUILDER (A LÓGICA HEIDELBERG)
 # =========================================================
 class SmartPackBackend:
     def __init__(self, csv_path='formulas_smartpack.csv'):
         if os.path.exists(csv_path):
             try:
-                # O parâmetro 'error_bad_lines' ou 'on_bad_lines' evita travar em linhas sujas
+                # 'on_bad_lines' ignora linhas quebradas para não travar
                 self.df = pd.read_csv(csv_path, delimiter=';', dtype={'Modelo': str}, on_bad_lines='skip')
                 self.df['Modelo'] = self.df['Modelo'].str.lstrip('0')
             except: self.df = pd.DataFrame()
@@ -26,133 +26,136 @@ class SmartPackBackend:
         df_model = self.df[self.df['Modelo'] == modelo]
         if df_model.empty: return None
 
-        # --- O DICIONÁRIO DE TRADUÇÃO (ROSETTA STONE) ---
-        # Aqui ensinamos ao Python o que cada código estranho do Prinect significa.
-        
-        # 1. Definição de Perfil (Tubular vs Plano)
+        # --- TRADUTOR DE FUNÇÕES (BASEADO NO SEU MANUAL) ---
         fam = modelo[0]
         is_tubular = fam in ['2','5','6','7']
         
-        # Fatores de Compensação (K-Factors)
+        # Fatores K (Calibrados para Onda B/C)
         k = {'C90': 0.5, 'HC90': 1.7*d, 'Glue': 0.5, 'Slot': d+1.0} if is_tubular else {'C90': 1.0*d, 'HC90': 1.0*d, 'Glue': 1.0*d, 'Slot': d+2.0}
         
-        # 2. Contexto Matemático Completo
         contexto = {
-            # Variáveis Básicas
-            'L': float(L), 'W': float(W), 'H': float(H), 
-            'd': lambda: float(d), # d() como função
+            # Variáveis do Usuário
+            'L': float(L), 'W': float(W), 'H': float(H), 'd': lambda: float(d),
             
             # Constantes Prinect (Flags)
             'dtID': 1, 'dtOD': 0, 'No': 0, 'Yes': 1, 'Flat': 0, 'Round': 1, 
-            'fd': lambda: 0, # Flute Direction (ignorar para tamanho)
-            'DT': 1, # Dimension Type (Inner Dimensions)
-            'UL': 1, # Use Layers (Sim)
+            'fd': lambda: 0, 'DT': 1, 'UL': 1,
             
-            # Matemática Pura
+            # Matemática
             'sqrt': math.sqrt, 'min': min, 'max': max, 'tan': math.tan, 'atan': math.atan,
             
-            # --- TRADUÇÃO DAS FUNÇÕES DO SEU EXEMPLO ---
-            'C90x': lambda *a: k['C90'],       # Correção X
-            'C90y': lambda *a: k['C90'],       # Correção Y
-            'HC90x': lambda *a: k['HC90'],     # Correção Altura
-            'GlueCorr': lambda *a: k['Glue'],  # Correção Cola
-            'LPCorr': lambda *a: 0.0,          # Line Correction (Geralmente 0 para corte)
-            'GLWidth': lambda *a: 35.0,        # Largura Aba Cola Padrão
-            'LSC': 0.0,                        # Layer Score Correction (Refinado)
-            'Wlc': 0.0,                        # Width Correction (Refinado)
+            # Funções de Engenharia (Mapeadas do Manual)
+            'C90x': lambda *a: k['C90'],       
+            'C90y': lambda *a: k['C90'],       
+            'HC90x': lambda *a: k['HC90'],     
+            'GlueCorr': lambda *a: k['Glue'],  
+            'LPCorr': lambda *a: 0.0,          
+            'GLWidth': lambda *a: 35.0,        
             'SlotWidth': lambda *a: k['Slot'],
-            
-            # Funções Genéricas para evitar erro
-            'O90y': lambda *a: d, 'DC0y': lambda *a: 0, 'I90y': lambda *a: d
+            'O90y': lambda *a: d,     # Outer 90 Correction (Geralmente 1 espessura)
+            'I90y': lambda *a: d,     # Inner 90 Correction
+            'DC0y': lambda *a: 0,     # Distance Correction
+            'Wlc': 0.0, 'LSC': 0.0    # Correções finas de camada
         }
         
         resolvidos = {}
-        
-        # 3. Processador Robusto (5 Passadas)
-        # O Python lê as fórmulas várias vezes para resolver dependências (Ex: FH depende de Wlc)
+        # 5 Passadas para resolver dependências (Ex: PH1 depende de PH que depende de W)
         for _ in range(5):
             for _, row in df_model.iterrows():
                 try:
                     param = row['Parametro']
-                    formula = str(row['Formula'])
-                    
-                    # Limpeza de String (Remove caracteres invisíveis do copy-paste)
-                    formula = formula.strip().replace('=', '')
-                    
+                    formula = str(row['Formula']).strip().replace('=', '')
                     if param in ['L', 'W', 'H']: continue
                     
-                    # Tenta calcular
-                    if formula.replace('.','',1).isdigit(): 
-                        val = float(formula)
-                    else: 
-                        # O segredo: eval() usa o nosso 'contexto' para traduzir
-                        val = eval(formula.replace('^', '**'), {}, contexto)
+                    if formula.replace('.','',1).isdigit(): val = float(formula)
+                    else: val = eval(formula.replace('^', '**'), {}, contexto)
                     
-                    # Salva no contexto para a próxima linha poder usar
                     contexto[param] = val
                     resolvidos[param] = val
                 except: 
-                    # Se falhar (ex: variável desconhecida), define como 0.0 para não quebrar o resto
-                    if param not in contexto:
-                        contexto[param] = 0.0
-                        
+                    if param not in contexto: contexto[param] = 0.0
         return resolvidos
 
     def calcular_blank_exato(self, modelo, L, W, H, d):
         vars_eng = self._resolve_formulas(modelo, L, W, H, d)
         if not vars_eng: return 0, 0, "Modelo Inexistente"
 
-        # Recupera as dimensões calculadas
+        # Dimensões Base de Vinco
         Lss = vars_eng.get('Lss', L + d)
         Wss = vars_eng.get('Wss', W + d)
         Hss = vars_eng.get('Hss', H + (1.7*d if modelo[0] in ['2','5','7'] else d))
 
-        # --- MONTAGEM FINAL DO BLANK ---
+        # --- LÓGICA DE MONTAGEM DINÂMICA (A SOLUÇÃO REAL) ---
+        # Não usamos 'IF 711', usamos 'O QUE TEM NA CAIXA?'
+
+        # 1. Eixo X (Largura Total da Chapa)
         has_GL = 'GL' in vars_eng or 'GLWidth' in str(self.df[self.df['Modelo']==modelo]['Formula'].values)
         
         if has_GL:
             GL = vars_eng.get('GL', 35.0)
-            
-            # Correção Fundo Automático (07xx)
+            # Desconto de dobra (Setback) para tubulares
             setback = 2.0 * d if modelo.startswith('7') else 0
             Blank_X = GL + 2*(Lss + Wss) - setback
-            
-            # Altura (Soma dos Flaps calculados pelo CSV)
-            FH_Top = vars_eng.get('FH', Wss/2)
-            
-            # Lógica Inteligente para Fundo
-            if 'Ext' in vars_eng: # Se achou a extensão do fundo automático
-                FH_Bottom = (Wss/2) + vars_eng['Ext']
-            elif 'FH_B' in vars_eng: 
-                FH_Bottom = vars_eng['FH_B']
+        else:
+            # Tabuleiros: Procura por variáveis de largura total
+            if 'L_Blank' in vars_eng: Blank_X = vars_eng['L_Blank']
+            elif 'FlatWidth' in vars_eng: Blank_X = vars_eng['FlatWidth']
             else:
-                FH_Bottom = FH_Top
-                
-            Blank_Y = FH_Top + Hss + FH_Bottom
-            return Blank_X, Blank_Y, "Cálculo Prinect (Traduzido)"
+                # Reconstrói: Base + 2x Paredes + Abas laterais (se houver)
+                Wall_H = vars_eng.get('Hss', H)
+                Blank_X = Lss + 2*Wall_H
+
+        # 2. Eixo Y (Comprimento Total da Chapa)
+        # AQUI ESTÁ A MÁGICA DA 0711
+        # O programa soma TUDO o que achar de componente vertical.
+        
+        Blank_Y = Hss # Começa com a altura do corpo
+
+        # Procura Aba Superior (Top Flap)
+        if 'FH' in vars_eng: Blank_Y += vars_eng['FH']
+        elif 'Top' in vars_eng: Blank_Y += vars_eng['Top']
+        elif modelo.startswith('2'): Blank_Y += Wss/2 # Fallback RSC
+        
+        # Procura Aba Inferior (Bottom Flap) OU Estrutura Complexa
+        found_bottom = False
+        
+        # Prioridade 1: Variáveis de Fundo Complexo (0711, 09xx)
+        # PH1 e PH2 são partes de fundos automáticos ou snap-lock
+        if 'PH1' in vars_eng: 
+            Blank_Y += vars_eng['PH1']
+            found_bottom = True
+        if 'PH2' in vars_eng: 
+            Blank_Y += vars_eng['PH2']
+            found_bottom = True
             
-        elif modelo == '427':
+        # Prioridade 2: Aba de Fundo Padrão
+        if not found_bottom:
+            if 'FH_B' in vars_eng: Blank_Y += vars_eng['FH_B']
+            elif 'Bottom' in vars_eng: Blank_Y += vars_eng['Bottom']
+            elif 'FH' in vars_eng: Blank_Y += vars_eng['FH'] # Simetria
+            elif modelo.startswith('2'): Blank_Y += Wss/2 # Fallback RSC
+
+        # Ajuste Final para E-commerce (0427) que foge à regra tubular
+        if modelo == '427':
             HssY = vars_eng.get('HssY', H + 2*d)
+            Blank_Y = (HssY + 14.0)*2 + (HssY - 0.5*d)*2 + Lss
+            # Recalcula X preciso
             FH1 = HssY + (1.5 * d)
             Blank_X = (H - ((3 * d) + 1.0)) + Wss + HssY + Wss + FH1
-            Blank_Y = (HssY + 14.0)*2 + (HssY - 0.5*d)*2 + Lss
             return Blank_Y, Blank_X, "E-commerce (Gold)"
-            
-        else:
-            # Genérico Tabuleiro
-            Wall_H = vars_eng.get('Hss', H)
-            return Lss + 2*Wall_H, Wss + 2*Wall_H, "Tabuleiro Genérico"
+
+        return Blank_X, Blank_Y, f"Dinâmico ({'Tubular' if has_GL else 'Plano'})"
 
 # =========================================================
 # 2. INTERFACE
 # =========================================================
-st.set_page_config(page_title="SmartPack V14", layout="wide")
+st.set_page_config(page_title="SmartPack V15", layout="wide")
 
 @st.cache_resource
-def load_engine_v14():
+def load_engine_v15():
     return SmartPackBackend('formulas_smartpack.csv')
 
-engine = load_engine_v14()
+engine = load_engine_v15()
 if 'carrinho' not in st.session_state: st.session_state.carrinho = []
 
 @st.cache_data
@@ -172,7 +175,7 @@ def load_prices_safe():
 
 df_materiais = load_prices_safe()
 
-st.title("🏭 SmartPack V14 - Prinect Interpreter")
+st.title("🏭 SmartPack V15 - Dynamic Builder")
 
 with st.sidebar:
     st.header("1. Material")
@@ -207,7 +210,7 @@ total = (area * preco) * 2.0 * qtd
 
 with col2:
     st.subheader("Resultado")
-    st.success(f"Lógica: **{perfil}**")
+    st.success(f"Motor: **{perfil}**")
     
     c1, c2 = st.columns(2)
     c1.metric("Largura Chapa", f"{bL:.1f} mm")
